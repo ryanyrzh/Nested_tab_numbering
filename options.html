@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: sans-serif; padding: 16px; max-width: 360px;">
+  <h3>Tree Numbering Settings</h3>
+
+  <label>Top left corner:
+    <select id="topLeftDisplay">
+      <option value="nested">Nested count</option>
+      <option value="flat">Flat count</option>
+      <option value="nothing">Nothing</option>
+    </select>
+  </label><br><br>
+
+  <label>Top right corner:
+    <select id="topRightDisplay">
+      <option value="nested">Nested count</option>
+      <option value="flat">Flat count</option>
+      <option value="nothing">Nothing</option>
+    </select>
+  </label>
+
+  <hr>
+
+  <label><input type="checkbox" id="autoTextColor" checked> Automatic text color</label><br><br>
+
+  <label id="textColorRow">Text color: <input type="color" id="textColor" value="#ffffff"></label><br><br>
+  <label>Font size (px): <input type="number" id="fontSize" value="10" min="6" max="24"></label><br><br>
+  <label>Nesting separator: <input type="text" id="separator" value="." maxlength="1" size="2"></label><br><br>
+  <label><input type="checkbox" id="boldText"> Bold text</label><br><br>
+
+  <button id="save">Save</button>
+  <div id="status" style="margin-top:8px; color: green;"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

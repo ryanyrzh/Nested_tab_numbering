@@ -1,0 +1,12 @@
+{
+  "addons": {
+    "nested-tab-numbering@ryanyrzh.com": {
+      "updates": [
+        {
+          "version": "0.1.0",
+          "update_link": "https://github.com/ryanyrzh/Nested_tab_numbering/releases/download/v0.1.0/nested-tab-numbering-0.1.0.xpi"
+        }
+      ]
+    }
+  }
+}
