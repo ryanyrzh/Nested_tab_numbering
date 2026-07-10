@@ -65,7 +65,15 @@ function buildCornerColorRules() {
     return `
       tab-item ::part(%EXTRA_CONTENTS_PART% corner-top-left),
       tab-item ::part(%EXTRA_CONTENTS_PART% corner-top-right) {
-        color: inherit;
+        color: var(--tab-text-regular, var(--browser-fg, CanvasText));
+      }
+      tab-item.active ::part(%EXTRA_CONTENTS_PART% corner-top-left),
+      tab-item.active ::part(%EXTRA_CONTENTS_PART% corner-top-right),
+      tab-item.bundled-active ::part(%EXTRA_CONTENTS_PART% corner-top-left),
+      tab-item.bundled-active ::part(%EXTRA_CONTENTS_PART% corner-top-right),
+      tab-item.highlighted ::part(%EXTRA_CONTENTS_PART% corner-top-left),
+      tab-item.highlighted ::part(%EXTRA_CONTENTS_PART% corner-top-right) {
+        color: var(--tab-text-active, var(--browser-fg-active, var(--tab-text-regular, CanvasText)));
       }
       tab-item.discarded ::part(%EXTRA_CONTENTS_PART% corner-top-left),
       tab-item.discarded ::part(%EXTRA_CONTENTS_PART% corner-top-right) {
