@@ -11,8 +11,10 @@ const DEFAULTS = {
 
 let opts = { ...DEFAULTS };
 const refreshTimers = new Map();
-const labelCache = new Map();
 const windowTabIds = new Map();
+const RECONNECT_INTERVAL_MS = 30000;
+let tstConnected = false;
+let lastConnectAttempt = 0;
 
 function migrateOptions(stored) {
   if (stored.topLeftDisplay !== undefined || stored.topRightDisplay !== undefined || stored.bottomLeftDisplay !== undefined) {
@@ -119,20 +121,48 @@ function buildStyle() {
 }
 
 async function registerToTST() {
+  await browser.runtime.sendMessage(TST_ID, {
+    type: 'register-self',
+    name: 'Nested tab numbering',
+    listeningTypes: [
+      'tab-attached', 'tab-detached', 'tab-moved',
+      'tabs-rendered', 'sidebar-show'
+    ],
+    permissions: ['tabs'],
+    style: buildStyle()
+  });
+}
+
+function markDisconnected() {
+  tstConnected = false;
+  for (const timer of refreshTimers.values()) clearTimeout(timer);
+  refreshTimers.clear();
+}
+
+async function tryConnect() {
+  lastConnectAttempt = Date.now();
   try {
-    await browser.runtime.sendMessage(TST_ID, {
-      type: 'register-self',
-      name: 'Nested tab numbering',
-      listeningTypes: [
-        'tab-attached', 'tab-detached', 'tab-moved',
-        'tabs-rendered', 'sidebar-show'
-      ],
-      permissions: ['tabs'],
-      style: buildStyle()
-    });
+    await registerToTST();
+    tstConnected = true;
+    refreshAllWindows();
+    return true;
   } catch (e) {
-    // TST not available
+    markDisconnected();
+    return false;
   }
+}
+
+function maybeConnect() {
+  if (tstConnected) return Promise.resolve(true);
+  if (Date.now() - lastConnectAttempt < RECONNECT_INTERVAL_MS) {
+    return Promise.resolve(false);
+  }
+  return tryConnect();
+}
+
+function messageWindowId(message) {
+  return message.windowId ?? message.window
+    ?? message.tabs?.[0]?.windowId ?? message.tab?.windowId;
 }
 
 function scheduleRefresh(windowId) {
@@ -143,6 +173,12 @@ function scheduleRefresh(windowId) {
   }, 200));
 }
 
+function normalizeTree(tree) {
+  if (Array.isArray(tree)) return tree;
+  if (tree && typeof tree === 'object' && tree.id != null) return [tree];
+  return null;
+}
+
 async function refreshWindow(windowId) {
   let tree;
   try {
@@ -151,8 +187,11 @@ async function refreshWindow(windowId) {
       window: windowId
     });
   } catch (e) {
+    markDisconnected();
     return;
   }
+
+  tree = normalizeTree(tree);
   if (!tree) return;
 
   const flatTabIds = [];
@@ -172,6 +211,35 @@ async function refreshWindow(windowId) {
   assignLabels(tree, '', () => ++flatCounter);
 }
 
+async function refreshRenderedTabs(windowId, tabIds) {
+  if (!tstConnected) return;
+
+  let tree;
+  try {
+    tree = await browser.runtime.sendMessage(TST_ID, {
+      type: 'get-tree',
+      window: windowId
+    });
+  } catch (e) {
+    markDisconnected();
+    return;
+  }
+
+  tree = normalizeTree(tree);
+  if (!tree || !tabIds.length) return;
+
+  const labels = new Map();
+  let flatCounter = 0;
+  collectLabels(tree, '', () => ++flatCounter, labels);
+
+  for (const tabId of tabIds) {
+    const label = labels.get(tabId);
+    if (label !== undefined) {
+      setLabel(tabId, 'tab-behind', label);
+    }
+  }
+}
+
 function collectTabIds(tabsArray, out) {
   tabsArray.forEach(tab => {
     out.push(tab.id);
@@ -181,12 +249,25 @@ function collectTabIds(tabsArray, out) {
   });
 }
 
+function collectLabels(tabsArray, prefix, nextFlat, out) {
+  tabsArray.forEach((tab, i) => {
+    const nestedLabel = prefix ? `${prefix}${opts.separator}${i + 1}` : `${i + 1}`;
+    const flatLabel = String(nextFlat());
+    const html = buildLabelHtml(nestedLabel, flatLabel);
+    if (html !== null) out.set(tab.id, html);
+
+    if (tab.children && tab.children.length) {
+      collectLabels(tab.children, nestedLabel, nextFlat, out);
+    }
+  });
+}
+
 function assignLabels(tabsArray, prefix, nextFlat) {
   tabsArray.forEach((tab, i) => {
     const nestedLabel = prefix ? `${prefix}${opts.separator}${i + 1}` : `${i + 1}`;
     const flatLabel = String(nextFlat());
-
-    setCornerLabels(tab, nestedLabel, flatLabel);
+    const html = buildLabelHtml(nestedLabel, flatLabel);
+    if (html !== null) setLabel(tab.id, 'tab-behind', html);
 
     if (tab.children && tab.children.length) {
       assignLabels(tab.children, nestedLabel, nextFlat);
@@ -199,11 +280,10 @@ function cornerStyleAttr() {
   return ` style="color: ${opts.textColor}"`;
 }
 
-function setCornerLabels(tab, nestedLabel, flatLabel) {
+function buildLabelHtml(nestedLabel, flatLabel) {
   const topLeft = opts.topLeftDisplay;
   const topRight = opts.topRightDisplay;
-
-  if (topLeft === 'nothing' && topRight === 'nothing') return;
+  if (topLeft === 'nothing' && topRight === 'nothing') return null;
 
   const topLeftLabel = topLeft === 'nested' ? nestedLabel : topLeft === 'flat' ? flatLabel : null;
   const topRightLabel = topRight === 'nested' ? nestedLabel : topRight === 'flat' ? flatLabel : null;
@@ -213,16 +293,10 @@ function setCornerLabels(tab, nestedLabel, flatLabel) {
   if (topLeftLabel !== null) parts.push(`<span part="corner-top-left"${styleAttr}>${topLeftLabel}</span>`);
   if (topRightLabel !== null) parts.push(`<span part="corner-top-right"${styleAttr}>${topRightLabel}</span>`);
 
-  setLabel(tab.id, 'tab-behind', `<div part="corners">${parts.join('')}</div>`);
+  return `<div part="corners">${parts.join('')}</div>`;
 }
 
 function setLabel(tabId, place, contents) {
-  const key = `${tabId}:${place}`;
-  const prev = labelCache.get(key);
-  if (prev === contents || (prev === undefined && contents === null)) return;
-  if (contents === null) labelCache.delete(key);
-  else labelCache.set(key, contents);
-
   browser.runtime.sendMessage(TST_ID, {
     type: 'set-extra-contents',
     tab: tabId,
@@ -232,7 +306,7 @@ function setLabel(tabId, place, contents) {
 }
 
 function refreshAllWindows() {
-  labelCache.clear();
+  if (!tstConnected) return;
   windowTabIds.clear();
   browser.windows.getAll().then(wins => {
     wins.forEach(w => refreshWindow(w.id));
@@ -241,10 +315,31 @@ function refreshAllWindows() {
 
 browser.runtime.onMessageExternal.addListener((message, sender) => {
   if (sender.id !== TST_ID) return;
+
+  tstConnected = true;
+
   if (message.type === 'ready') {
-    registerToTST().then(refreshAllWindows);
+    loadOptions().then(tryConnect);
+    return;
+  }
+
+  const windowId = messageWindowId(message);
+
+  if (message.type === 'sidebar-show') {
+    if (windowId != null) refreshWindow(windowId);
+    else refreshAllWindows();
+    return;
+  }
+
+  if (message.type === 'tabs-rendered' && message.tabs?.length && windowId != null) {
+    refreshRenderedTabs(windowId, message.tabs.map(tab => tab.id));
+    return;
+  }
+
+  if (windowId != null) {
+    scheduleRefresh(windowId);
   } else {
-    scheduleRefresh(message.windowId);
+    refreshAllWindows();
   }
 });
 
@@ -254,14 +349,17 @@ browser.tabs.onMoved.addListener((tabId, moveInfo) => scheduleRefresh(moveInfo.w
 browser.tabs.onAttached.addListener((tabId, attachInfo) => scheduleRefresh(attachInfo.newWindowId));
 browser.tabs.onDetached.addListener((tabId, detachInfo) => scheduleRefresh(detachInfo.oldWindowId));
 
-browser.storage.onChanged.addListener(async () => {
-  await loadOptions();
-  await registerToTST();
-  refreshAllWindows();
+browser.storage.onChanged.addListener(() => {
+  loadOptions().then(() => {
+    if (tstConnected) {
+      registerToTST().then(() => refreshAllWindows()).catch(() => markDisconnected());
+    } else {
+      tryConnect();
+    }
+  });
 });
 
 (async () => {
   await loadOptions();
-  await registerToTST();
-  refreshAllWindows();
+  await tryConnect();
 })();
