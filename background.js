@@ -8,58 +8,11 @@ const DEFAULTS = {
   separator: '.',
   boldText: false
 };
-const ALL_PLACES = ['tab-front', 'tab-behind', 'tab-above', 'tab-below', 'tab-indent'];
 
 let opts = { ...DEFAULTS };
-let refreshTimer = null;
-let themeColors = null;
-
-function parseHexColor(color) {
-  if (!color || typeof color !== 'string') return null;
-  const hex = color.match(/^#([0-9a-f]{6})$/i);
-  if (!hex) return null;
-  const value = parseInt(hex[1], 16);
-  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
-}
-
-function relativeLuminance(r, g, b) {
-  const channel = c => {
-    c /= 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-}
-
-function contrastTextColor(bgColor) {
-  const rgb = parseHexColor(bgColor);
-  if (!rgb) return null;
-  return relativeLuminance(...rgb) > 0.45 ? '#1a1a1a' : '#e8e8e8';
-}
-
-async function loadThemeColors() {
-  try {
-    const theme = await browser.theme.getCurrent();
-    themeColors = theme.colors || null;
-  } catch (e) {
-    themeColors = null;
-  }
-}
-
-function getAutoTextColor(tab) {
-  const isActive = tab.active || tab.highlighted;
-  const c = themeColors;
-  if (!c || !Object.keys(c).length) return null;
-
-  const explicit = isActive
-    ? (c.tab_text || c.toolbar_text)
-    : c.tab_background_text;
-  if (explicit) return explicit;
-
-  const bg = isActive
-    ? (c.tab_selected || c.toolbar || c.frame)
-    : (c.tab || c.frame);
-  return contrastTextColor(bg);
-}
+const refreshTimers = new Map();
+const labelCache = new Map();
+const windowTabIds = new Map();
 
 function migrateOptions(stored) {
   if (stored.topLeftDisplay !== undefined || stored.topRightDisplay !== undefined || stored.bottomLeftDisplay !== undefined) {
@@ -112,15 +65,7 @@ function buildCornerColorRules() {
     return `
       tab-item ::part(%EXTRA_CONTENTS_PART% corner-top-left),
       tab-item ::part(%EXTRA_CONTENTS_PART% corner-top-right) {
-        color: var(--tab-text-regular, var(--browser-fg, CanvasText));
-      }
-      tab-item.active ::part(%EXTRA_CONTENTS_PART% corner-top-left),
-      tab-item.active ::part(%EXTRA_CONTENTS_PART% corner-top-right),
-      tab-item.bundled-active ::part(%EXTRA_CONTENTS_PART% corner-top-left),
-      tab-item.bundled-active ::part(%EXTRA_CONTENTS_PART% corner-top-right),
-      tab-item.highlighted ::part(%EXTRA_CONTENTS_PART% corner-top-left),
-      tab-item.highlighted ::part(%EXTRA_CONTENTS_PART% corner-top-right) {
-        color: var(--tab-text-active, var(--browser-fg-active, var(--tab-text-regular, CanvasText)));
+        color: inherit;
       }
       tab-item.discarded ::part(%EXTRA_CONTENTS_PART% corner-top-left),
       tab-item.discarded ::part(%EXTRA_CONTENTS_PART% corner-top-right) {
@@ -153,6 +98,7 @@ function buildStyle() {
       line-height: 1;
       position: absolute;
       top: 0;
+      transition: color 0.2s ease, opacity 0.2s ease;
     }
     ::part(%EXTRA_CONTENTS_PART% corner-top-left) {
       left: 0;
@@ -182,8 +128,11 @@ async function registerToTST() {
 }
 
 function scheduleRefresh(windowId) {
-  clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(() => refreshWindow(windowId), 150);
+  clearTimeout(refreshTimers.get(windowId));
+  refreshTimers.set(windowId, setTimeout(() => {
+    refreshTimers.delete(windowId);
+    refreshWindow(windowId);
+  }, 200));
 }
 
 async function refreshWindow(windowId) {
@@ -200,12 +149,16 @@ async function refreshWindow(windowId) {
 
   const flatTabIds = [];
   collectTabIds(tree, flatTabIds);
-
-  for (const tabId of flatTabIds) {
-    for (const place of ALL_PLACES) {
-      setLabel(tabId, place, null);
+  const currentIds = new Set(flatTabIds);
+  const prevIds = windowTabIds.get(windowId);
+  if (prevIds) {
+    for (const tabId of prevIds) {
+      if (!currentIds.has(tabId)) {
+        setLabel(tabId, 'tab-behind', null);
+      }
     }
   }
+  windowTabIds.set(windowId, currentIds);
 
   let flatCounter = 0;
   assignLabels(tree, '', () => ++flatCounter);
@@ -233,9 +186,9 @@ function assignLabels(tabsArray, prefix, nextFlat) {
   });
 }
 
-function cornerStyleAttr(tab) {
-  const color = opts.autoTextColor ? getAutoTextColor(tab) : opts.textColor;
-  return color ? ` style="color: ${color}"` : '';
+function cornerStyleAttr() {
+  if (opts.autoTextColor) return '';
+  return ` style="color: ${opts.textColor}"`;
 }
 
 function setCornerLabels(tab, nestedLabel, flatLabel) {
@@ -246,7 +199,7 @@ function setCornerLabels(tab, nestedLabel, flatLabel) {
 
   const topLeftLabel = topLeft === 'nested' ? nestedLabel : topLeft === 'flat' ? flatLabel : null;
   const topRightLabel = topRight === 'nested' ? nestedLabel : topRight === 'flat' ? flatLabel : null;
-  const styleAttr = cornerStyleAttr(tab);
+  const styleAttr = cornerStyleAttr();
 
   const parts = [];
   if (topLeftLabel !== null) parts.push(`<span part="corner-top-left"${styleAttr}>${topLeftLabel}</span>`);
@@ -256,6 +209,12 @@ function setCornerLabels(tab, nestedLabel, flatLabel) {
 }
 
 function setLabel(tabId, place, contents) {
+  const key = `${tabId}:${place}`;
+  const prev = labelCache.get(key);
+  if (prev === contents || (prev === undefined && contents === null)) return;
+  if (contents === null) labelCache.delete(key);
+  else labelCache.set(key, contents);
+
   browser.runtime.sendMessage(TST_ID, {
     type: 'set-extra-contents',
     tab: tabId,
@@ -265,6 +224,8 @@ function setLabel(tabId, place, contents) {
 }
 
 function refreshAllWindows() {
+  labelCache.clear();
+  windowTabIds.clear();
   browser.windows.getAll().then(wins => {
     wins.forEach(w => refreshWindow(w.id));
   });
@@ -285,26 +246,14 @@ browser.tabs.onMoved.addListener((tabId, moveInfo) => scheduleRefresh(moveInfo.w
 browser.tabs.onAttached.addListener((tabId, attachInfo) => scheduleRefresh(attachInfo.newWindowId));
 browser.tabs.onDetached.addListener((tabId, detachInfo) => scheduleRefresh(detachInfo.oldWindowId));
 
-browser.tabs.onActivated.addListener(info => scheduleRefresh(info.windowId));
-browser.tabs.onHighlighted.addListener(info => scheduleRefresh(info.windowId));
-
-if (browser.theme && browser.theme.onUpdated) {
-  browser.theme.onUpdated.addListener(async () => {
-    await loadThemeColors();
-    refreshAllWindows();
-  });
-}
-
 browser.storage.onChanged.addListener(async () => {
   await loadOptions();
-  await loadThemeColors();
   await registerToTST();
   refreshAllWindows();
 });
 
 (async () => {
   await loadOptions();
-  await loadThemeColors();
   await registerToTST();
   refreshAllWindows();
 })();
