@@ -28,6 +28,10 @@ function migrateOptions(stored) {
     return migrated;
   }
 
+  if (!stored.showNested && !stored.showFlat) {
+    return { ...DEFAULTS };
+  }
+
   const topPlaces = ['tab-front', 'tab-above', 'tab-indent'];
   const bottomPlaces = ['tab-behind', 'tab-below'];
   let topLeftDisplay = 'nothing';
@@ -59,6 +63,11 @@ function migrateOptions(stored) {
 
 async function loadOptions() {
   const stored = await browser.storage.local.get(null);
+  if (Object.keys(stored).length === 0) {
+    opts = { ...DEFAULTS };
+    await browser.storage.local.set(DEFAULTS);
+    return;
+  }
   opts = migrateOptions(stored);
 }
 
