@@ -175,6 +175,11 @@ function messageWindowId(message) {
 }
 
 function scheduleRefresh(windowId) {
+  if (windowId == null) return;
+  if (!tstConnected) {
+    maybeConnect();
+    return;
+  }
   clearTimeout(refreshTimers.get(windowId));
   refreshTimers.set(windowId, setTimeout(() => {
     refreshTimers.delete(windowId);
