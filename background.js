@@ -134,7 +134,7 @@ async function registerToTST() {
     type: 'register-self',
     name: 'Nested tab numbering',
     listeningTypes: [
-      'tab-attached', 'tab-detached', 'tab-moved',
+      'tree-attached', 'tree-detached',
       'tabs-rendered', 'sidebar-show'
     ],
     permissions: ['tabs'],
@@ -342,6 +342,11 @@ browser.runtime.onMessageExternal.addListener((message, sender) => {
   if (message.type === 'sidebar-show') {
     if (windowId != null) refreshWindow(windowId);
     else refreshAllWindows();
+    return;
+  }
+
+  if (message.type === 'tree-attached' || message.type === 'tree-detached') {
+    if (windowId != null) scheduleRefresh(windowId);
     return;
   }
 
