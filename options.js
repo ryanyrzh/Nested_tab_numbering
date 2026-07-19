@@ -29,7 +29,7 @@ const BUILTIN = {
 const BUILTIN_THEME_IDS = {
   'firefox-compact-light@mozilla.org': 'light',
   'firefox-compact-dark@mozilla.org': 'dark',
-  'default-theme@mozilla.org': null // system — follow chromePrefersDark()
+  'default-theme@mozilla.org': null // follow chromePrefersDark()
 };
 
 function colorToCSS(color) {
@@ -103,19 +103,77 @@ function setVar(name, value) {
   else document.documentElement.style.removeProperty(name);
 }
 
-function pickPopupColors(colors, fallback) {
-  if (!colors) return fallback;
+function firstDefined(...values) {
+  for (const v of values) {
+    if (v != null) return v;
+  }
+  return null;
+}
+
+/** Map theme chrome colors onto popup slots (popup <- toolbar <- frame, etc.). */
+function mapChromeToPopup(colors) {
+  if (!colors) return null;
   return {
-    popup: colors.popup ?? fallback.popup,
-    popup_text: colors.popup_text ?? fallback.popup_text,
-    popup_border: colors.popup_border ?? fallback.popup_border,
-    popup_highlight: colors.popup_highlight ?? fallback.popup_highlight,
-    popup_highlight_text: colors.popup_highlight_text ?? fallback.popup_highlight_text
+    popup: firstDefined(colors.popup, colors.toolbar, colors.frame),
+    popup_text: firstDefined(
+      colors.popup_text,
+      colors.toolbar_text,
+      colors.tab_background_text
+    ),
+    popup_border: firstDefined(
+      colors.popup_border,
+      colors.toolbar_bottom_separator,
+      colors.toolbar_field_border
+    ),
+    popup_highlight: firstDefined(
+      colors.popup_highlight,
+      colors.toolbar_field_border_focus
+    ),
+    popup_highlight_text: firstDefined(
+      colors.popup_highlight_text,
+      colors.toolbar_field_text,
+      colors.popup_text,
+      colors.toolbar_text
+    )
+  };
+}
+
+function pickPopupColors(colors, fallback) {
+  const mapped = mapChromeToPopup(colors);
+  if (!mapped) return fallback;
+  return {
+    popup: mapped.popup ?? fallback.popup,
+    popup_text: mapped.popup_text ?? fallback.popup_text,
+    popup_border: mapped.popup_border ?? fallback.popup_border,
+    popup_highlight: mapped.popup_highlight ?? fallback.popup_highlight,
+    popup_highlight_text: mapped.popup_highlight_text ?? fallback.popup_highlight_text
   };
 }
 
 function hasPopupColors(colors) {
-  return colors != null && (colors.popup != null || colors.popup_text != null);
+  if (colors == null) return false;
+  const mapped = mapChromeToPopup(colors);
+  return mapped.popup != null || mapped.popup_text != null;
+}
+
+function colorsEqual(a, b) {
+  const ca = colorToCSS(a);
+  const cb = colorToCSS(b);
+  if (ca == null || cb == null) return false;
+  return ca.replace(/\s+/g, '').toLowerCase() === cb.replace(/\s+/g, '').toLowerCase();
+}
+
+function pickStaticPopupColors(colors) {
+  if (!colors) return null;
+  const mapped = mapChromeToPopup(colors);
+  if (!mapped.popup && !mapped.popup_text) return null;
+  return {
+    popup: mapped.popup ?? null,
+    popup_text: mapped.popup_text ?? null,
+    popup_border: mapped.popup_border ?? null,
+    popup_highlight: mapped.popup_highlight ?? null,
+    popup_highlight_text: mapped.popup_highlight_text ?? null
+  };
 }
 
 function applyColors(colors) {
@@ -208,7 +266,8 @@ async function fetchManifestFromAmo(themeId) {
   return JSON.parse(new TextDecoder().decode(raw));
 }
 
-async function loadDarkThemeColors() {
+/** Static light/dark popup colors from the enabled theme (not live overlays). */
+async function loadStaticThemeColors() {
   if (!browser.management?.getAll) return null;
 
   let theme;
@@ -221,11 +280,13 @@ async function loadDarkThemeColors() {
   if (!theme) return null;
 
   const builtin = BUILTIN_THEME_IDS[theme.id];
-  if (builtin === 'dark') return BUILTIN.dark;
-  if (builtin === 'light') return BUILTIN.light;
-  if (builtin === null) return BUILTIN[chromePrefersDark() ? 'dark' : 'light'];
+  if (builtin === 'dark') return { light: BUILTIN.light, dark: BUILTIN.dark };
+  if (builtin === 'light') return { light: BUILTIN.light, dark: null };
+  if (builtin === null) {
+    return { light: BUILTIN.light, dark: BUILTIN.dark };
+  }
 
-  const cacheKey = `darkThemeColors:${theme.id}:${theme.version}`;
+  const cacheKey = `staticThemeColors:${theme.id}:${theme.version}`;
   try {
     const cached = await browser.storage.local.get(cacheKey);
     if (cached[cacheKey]) return cached[cacheKey];
@@ -235,20 +296,33 @@ async function loadDarkThemeColors() {
 
   try {
     const manifest = await fetchManifestFromAmo(theme.id);
-    const colors = manifest?.dark_theme?.colors;
-    if (!colors) return null;
-    const picked = {
-      popup: colors.popup ?? null,
-      popup_text: colors.popup_text ?? null,
-      popup_border: colors.popup_border ?? null,
-      popup_highlight: colors.popup_highlight ?? null,
-      popup_highlight_text: colors.popup_highlight_text ?? null
-    };
-    await browser.storage.local.set({ [cacheKey]: picked });
-    return picked;
+    const light = pickStaticPopupColors(manifest?.theme?.colors);
+    const dark = pickStaticPopupColors(manifest?.dark_theme?.colors);
+    if (!light && !dark) return null;
+    const pair = { light, dark };
+    await browser.storage.local.set({ [cacheKey]: pair });
+    return pair;
   } catch {
     return null;
   }
+}
+
+/**
+ * In dual mode, getCurrent() always returns only the light half.
+ * Prefer live colors unless they match that static light half.
+ */
+function isStaticLightHalf(liveColors, staticPair) {
+  if (!staticPair?.dark || !hasPopupColors(staticPair.dark)) return false;
+  if (!staticPair.light || !hasPopupColors(staticPair.light)) return false;
+  if (!hasPopupColors(liveColors)) return false;
+
+  const live = mapChromeToPopup(liveColors);
+  const light = mapChromeToPopup(staticPair.light);
+  const dark = mapChromeToPopup(staticPair.dark);
+
+  if (!colorsEqual(live.popup, light.popup)) return false;
+  if (colorsEqual(live.popup, dark.popup)) return false;
+  return true;
 }
 
 async function applyTheme(theme) {
@@ -256,27 +330,26 @@ async function applyTheme(theme) {
   const darkUI = chromePrefersDark();
   const fallback = BUILTIN[darkUI ? 'dark' : 'light'];
 
-  if (darkUI) {
-    // getCurrent() only returns the light half for dual-mode themes
-    const darkColors = await loadDarkThemeColors();
-    if (hasPopupColors(darkColors)) {
-      applyColors(pickPopupColors(darkColors, fallback));
-      return;
-    }
-    // No dark_theme, use getCurrent() colors
-    if (hasPopupColors(c)) {
-      applyColors(pickPopupColors(c, BUILTIN.light));
-      return;
-    }
-    applyColors(fallback);
+  const staticPair = darkUI ? await loadStaticThemeColors() : null;
+  const staticDark = staticPair?.dark;
+
+  if (darkUI && isStaticLightHalf(c, staticPair)) {
+    applyColors(pickPopupColors(staticDark, fallback));
     return;
   }
 
+  // Live theme (Adaptive Tab Colors, normal themes, etc.)
   if (hasPopupColors(c)) {
-    applyColors(pickPopupColors(c, BUILTIN.light));
+    applyColors(pickPopupColors(c, fallback));
     return;
   }
-  applyColors(BUILTIN.light);
+
+  if (darkUI && hasPopupColors(staticDark)) {
+    applyColors(pickPopupColors(staticDark, fallback));
+    return;
+  }
+
+  applyColors(fallback);
 }
 
 function loadTheme() {
